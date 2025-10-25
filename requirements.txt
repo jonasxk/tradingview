@@ -2,27 +2,3 @@ fastapi==0.115.0
 uvicorn[standard]==0.32.0
 tradingview-ta==3.3.0
 pydantic==2.10.0
-```
-
-4. Click **"Commit changes"**
-
----
-
-## 🚀 **Then Redeploy on Railway**
-
-1. Go back to Railway
-2. Your project should **automatically redeploy** when you push to GitHub
-3. Or manually click **"Redeploy"** in Railway
-
-The newer versions have pre-built wheels so they won't need to compile, which should fix the build error.
-
----
-
-## 🔄 **Alternative: Use Python 3.11 Instead of 3.13**
-
-If the above still fails, Railway might be using Python 3.13 which has compatibility issues. Let's force it to use Python 3.11:
-
-1. In your GitHub repo, create a new file called `runtime.txt`
-2. Add this single line:
-```
-   python-3.11.9
