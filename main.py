@@ -5,15 +5,12 @@ from tradingview_ta import TA_Handler, Interval
 import uvicorn
 import time
 import logging
-from datetime import datetime, timedelta
 from typing import Optional
-import yfinance as yf
-import pandas as pd
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="TradingView Data API with Historical Data")
+app = FastAPI(title="TradingView Data API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,65 +55,13 @@ def get_analysis_with_retry(handler, max_retries=3):
             else:
                 raise e
 
-def convert_symbol_to_yahoo(symbol, exchange):
-    """Convert TradingView symbols to Yahoo Finance format"""
-    symbol_map = {
-        # Forex pairs
-        "EURUSD": "EURUSD=X",
-        "GBPUSD": "GBPUSD=X",
-        "USDJPY": "USDJPY=X",
-        "AUDUSD": "AUDUSD=X",
-        "USDCAD": "USDCAD=X",
-        "USDCHF": "USDCHF=X",
-        "NZDUSD": "NZDUSD=X",
-        "GBPJPY": "GBPJPY=X",
-        "EURJPY": "EURJPY=X",
-        # Gold/Silver
-        "XAUUSD": "GC=F",
-        "XAGUSD": "SI=F",
-        # Crypto
-        "BTCUSD": "BTC-USD",
-        "ETHUSD": "ETH-USD",
-        "BTCUSDT": "BTC-USD",
-        "ETHUSDT": "ETH-USD"
-    }
-    return symbol_map.get(symbol, symbol)
-
-def calculate_price_action_levels(df):
-    """Calculate support/resistance and price action levels"""
-    if len(df) < 7:
-        return None
-    
-    # Calculate swing highs and lows
-    df['swing_high'] = df['High'].rolling(window=3, center=True).max()
-    df['swing_low'] = df['Low'].rolling(window=3, center=True).min()
-    
-    # Get key levels
-    period_high = df['High'].max()
-    period_low = df['Low'].min()
-    period_range = period_high - period_low
-    
-    # Recent highs/lows (last 3 days)
-    recent_df = df.tail(72) if len(df) >= 72 else df.tail(len(df))
-    recent_high = recent_df['High'].max()
-    recent_low = recent_df['Low'].min()
-    
-    # Calculate consolidation zones
-    avg_range = df['High'].subtract(df['Low']).mean()
-    
-    return {
-        "period_high": float(period_high),
-        "period_low": float(period_low),
-        "period_range": float(period_range),
-        "recent_high_3d": float(recent_high),
-        "recent_low_3d": float(recent_low),
-        "avg_candle_range": float(avg_range),
-        "current_position_in_range": float((df['Close'].iloc[-1] - period_low) / period_range * 100) if period_range > 0 else 50
-    }
-
 @app.get("/")
 def root():
-    return {"status": "TradingView API with Historical Data", "version": "2.0"}
+    return {"status": "TradingView API is running", "version": "2.1"}
+
+@app.get("/health")
+def health():
+    return {"status": "healthy", "endpoints": ["/get-data", "/get-multi-timeframe", "/get-historical-with-levels"]}
 
 @app.post("/get-data")
 def get_trading_data(request: SymbolRequest):
@@ -189,104 +134,6 @@ def get_trading_data(request: SymbolRequest):
         logger.error(f"Error processing {request.symbol}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/get-historical-with-levels")
-def get_historical_with_levels(request: SymbolRequest):
-    """Get ALL historical candles + price action levels + current indicators"""
-    try:
-        # Convert symbol for Yahoo Finance
-        yahoo_symbol = convert_symbol_to_yahoo(request.symbol, request.exchange)
-        
-        # Map interval
-        interval_map_yf = {
-            "1M": "1m",
-            "5M": "5m",
-            "15M": "15m",
-            "1H": "1h",
-            "4H": "4h",
-            "1D": "1d"
-        }
-        yf_interval = interval_map_yf.get(request.interval, "1h")
-        
-        # Calculate period
-        period = f"{request.lookback_days}d"
-        
-        # Fetch historical data
-        logger.info(f"Fetching {yahoo_symbol} with interval {yf_interval} for period {period}")
-        ticker = yf.Ticker(yahoo_symbol)
-        df = ticker.history(period=period, interval=yf_interval)
-        
-        if df.empty:
-            raise HTTPException(status_code=404, detail=f"No data found for {yahoo_symbol}")
-        
-        logger.info(f"Retrieved {len(df)} candles for {yahoo_symbol}")
-        
-        # Calculate price action levels
-        levels = calculate_price_action_levels(df)
-        
-        # Get TradingView indicators for current candle
-        interval_map_tv = {
-            "1M": Interval.INTERVAL_1_MINUTE,
-            "5M": Interval.INTERVAL_5_MINUTES,
-            "15M": Interval.INTERVAL_15_MINUTES,
-            "1H": Interval.INTERVAL_1_HOUR,
-            "4H": Interval.INTERVAL_4_HOURS,
-            "1D": Interval.INTERVAL_1_DAY
-        }
-        
-        handler = TA_Handler(
-            symbol=request.symbol,
-            exchange=request.exchange,
-            screener=request.screener,
-            interval=interval_map_tv.get(request.interval, Interval.INTERVAL_1_HOUR)
-        )
-        
-        analysis = get_analysis_with_retry(handler)
-        indicators = analysis.indicators
-        
-        # Convert ALL candles to list
-        df_reset = df.reset_index()
-        candles_list = []
-        
-        for _, row in df_reset.iterrows():
-            candles_list.append({
-                "time": row['Datetime'].isoformat() if 'Datetime' in row else str(row.name),
-                "open": float(row['Open']),
-                "high": float(row['High']),
-                "low": float(row['Low']),
-                "close": float(row['Close']),
-                "volume": float(row['Volume'])
-            })
-        
-        output = {
-            "symbol": request.symbol,
-            "exchange": request.exchange,
-            "screener": request.screener,
-            "timeframe": request.interval,
-            "lookback_days": request.lookback_days,
-            "total_candles": len(df),
-            "price_action_levels": levels,
-            "candles": candles_list,  # ALL candles from the lookback period
-            "current_indicators": {
-                "rsi": indicators.get("RSI", 0),
-                "atr": indicators.get("ATR", 0),
-                "ema20": indicators.get("EMA20", 0),
-                "ema50": indicators.get("EMA50", 0),
-                "ema200": indicators.get("EMA200", 0),
-                "adx": indicators.get("ADX", 0),
-                "macd": indicators.get("MACD.macd", 0),
-                "macd_signal": indicators.get("MACD.signal", 0),
-                "stoch_k": indicators.get("Stoch.K", 0),
-                "stoch_d": indicators.get("Stoch.D", 0)
-            },
-            "recommendation": analysis.summary.get("RECOMMENDATION", "NEUTRAL")
-        }
-        
-        return {"success": True, "data": output}
-        
-    except Exception as e:
-        logger.error(f"Error fetching historical data: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.post("/get-multi-timeframe")
 def get_multi_timeframe(request: SymbolRequest):
     """Get data for multiple timeframes at once"""
@@ -308,7 +155,156 @@ def get_multi_timeframe(request: SymbolRequest):
         logger.error(f"Error in multi-timeframe: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/get-historical-with-levels")
+def get_historical_with_levels(request: SymbolRequest):
+    """Get historical candles with price action levels using yfinance"""
+    try:
+        # Try to import yfinance
+        try:
+            import yfinance as yf
+            import pandas as pd
+        except ImportError as ie:
+            logger.error(f"yfinance not installed: {str(ie)}")
+            raise HTTPException(
+                status_code=501, 
+                detail="Historical data endpoint requires yfinance package. Use /get-data instead."
+            )
+        
+        # Symbol mapping for Yahoo Finance
+        symbol_map = {
+            "EURUSD": "EURUSD=X",
+            "GBPUSD": "GBPUSD=X",
+            "USDJPY": "USDJPY=X",
+            "AUDUSD": "AUDUSD=X",
+            "USDCAD": "USDCAD=X",
+            "USDCHF": "USDCHF=X",
+            "NZDUSD": "NZDUSD=X",
+            "GBPJPY": "GBPJPY=X",
+            "EURJPY": "EURJPY=X",
+            "XAUUSD": "GC=F",
+            "XAGUSD": "SI=F",
+            "BTCUSD": "BTC-USD",
+            "ETHUSD": "ETH-USD",
+            "BTCUSDT": "BTC-USD",
+            "ETHUSDT": "ETH-USD"
+        }
+        
+        yahoo_symbol = symbol_map.get(request.symbol, f"{request.symbol}=X")
+        
+        # Interval mapping
+        interval_map = {
+            "1M": "1m",
+            "5M": "5m", 
+            "15M": "15m",
+            "1H": "1h",
+            "4H": "4h",
+            "1D": "1d"
+        }
+        
+        yf_interval = interval_map.get(request.interval, "1h")
+        lookback = request.lookback_days
+        
+        # Fetch data from Yahoo Finance
+        logger.info(f"Fetching {yahoo_symbol} with interval {yf_interval} for {lookback} days")
+        ticker = yf.Ticker(yahoo_symbol)
+        df = ticker.history(period=f"{lookback}d", interval=yf_interval)
+        
+        if df.empty:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No data found for {yahoo_symbol}. Symbol may not be available on Yahoo Finance."
+            )
+        
+        logger.info(f"Retrieved {len(df)} candles for {yahoo_symbol}")
+        
+        # Calculate price action levels
+        period_high = float(df['High'].max())
+        period_low = float(df['Low'].min())
+        period_range = period_high - period_low
+        current_price = float(df['Close'].iloc[-1])
+        
+        # Recent 3-day levels
+        recent_df = df.tail(72) if len(df) >= 72 else df
+        recent_high = float(recent_df['High'].max())
+        recent_low = float(recent_df['Low'].min())
+        avg_range = float(df['High'].subtract(df['Low']).mean())
+        
+        # Convert all candles to list
+        candles = []
+        for idx, row in df.iterrows():
+            candles.append({
+                "time": idx.isoformat(),
+                "open": float(row['Open']),
+                "high": float(row['High']),
+                "low": float(row['Low']),
+                "close": float(row['Close']),
+                "volume": float(row['Volume'])
+            })
+        
+        # Get TradingView indicators for current candle
+        interval_tv_map = {
+            "1M": Interval.INTERVAL_1_MINUTE,
+            "5M": Interval.INTERVAL_5_MINUTES,
+            "15M": Interval.INTERVAL_15_MINUTES,
+            "1H": Interval.INTERVAL_1_HOUR,
+            "4H": Interval.INTERVAL_4_HOURS,
+            "1D": Interval.INTERVAL_1_DAY
+        }
+        
+        handler = TA_Handler(
+            symbol=request.symbol,
+            exchange=request.exchange,
+            screener=request.screener,
+            interval=interval_tv_map.get(request.interval, Interval.INTERVAL_1_HOUR)
+        )
+        
+        analysis = get_analysis_with_retry(handler)
+        indicators = analysis.indicators
+        
+        output = {
+            "symbol": request.symbol,
+            "exchange": request.exchange,
+            "screener": request.screener,
+            "timeframe": request.interval,
+            "lookback_days": lookback,
+            "total_candles": len(df),
+            "price_action_levels": {
+                "period_high": period_high,
+                "period_low": period_low,
+                "period_range": period_range,
+                "recent_high_3d": recent_high,
+                "recent_low_3d": recent_low,
+                "avg_candle_range": avg_range,
+                "current_position_in_range": ((current_price - period_low) / period_range * 100) if period_range > 0 else 50
+            },
+            "candles": candles,
+            "current_indicators": {
+                "rsi": indicators.get("RSI", 0),
+                "atr": indicators.get("ATR", 0),
+                "ema20": indicators.get("EMA20", 0),
+                "ema50": indicators.get("EMA50", 0),
+                "ema200": indicators.get("EMA200", 0),
+                "adx": indicators.get("ADX", 0),
+                "macd": indicators.get("MACD.macd", 0),
+                "macd_signal": indicators.get("MACD.signal", 0),
+                "stoch_k": indicators.get("Stoch.K", 0),
+                "stoch_d": indicators.get("Stoch.D", 0),
+                "bb_upper": indicators.get("BB.upper", 0),
+                "bb_lower": indicators.get("BB.lower", 0)
+            },
+            "recommendation": analysis.summary.get("RECOMMENDATION", "NEUTRAL")
+        }
+        
+        return {"success": True, "data": output}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Historical data error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching historical data: {str(e)}")
+
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 8000))
+    logger.info(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
